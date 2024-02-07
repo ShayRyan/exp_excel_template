@@ -1,0 +1,161 @@
+
+Example: EirSDSIComplianceExport
+https://github.com/nbirl/ndp-lambdas/blob/0c7578dd8427d78e08e284d118766e0edb9de1ae/EirSDSIComplianceExport
+
+
+lambda_handler
+	
+	try:
+    
+        create_db_if_not_exists(db_name) # create output & output_daily db's
+    	
+    	# 1 - SDSI info
+    	eir_sdsi_df = get_eir_sdsi_main_data(date_to_overwrite) # create DF for SDSI info
+    	write_parquet(eir_sdsi_df, SDSI_OUTPUT_TABLE_NAME) # write SDSI DF as parquet
+    
+        # 2 - primary form
+    	eir_sdsi_primaryform_df = get_eir_sdsi_primary_form_data(date_to_overwrite) # DF for primary form
+    	write_parquet(incomplete_primary_forms_df, PRIMARYFORM_INCOMPLETE_OUTPUT_TABLE_NAME) # write Primary DF as parquet
+    	write_parquet(valid_primary_forms_df, PRIMARYFORM_OUTPUT_TABLE_NAME) # write Primary DF as parquet after validation - has an SAD for connection 
+***    	populate_primary_form_file(valid_primary_forms_df, date_to_overwrite) # populate and write the primary form files into sharepoint as Excel files
+    	
+    	# 3 - whereabouts
+    	eir_sdsi_whereabouts_df = get_eir_sdsi_whereabouts_data(date_to_overwrite)
+	    write_parquet(eir_sdsi_whereabouts_df, WHEREABOUTS_OUTPUT_TABLE_NAME) # write Primary DF as parquet
+***		populate_whereabouts_file(eir_sdsi_whereabouts_df, date_to_overwrite) # populate and write the whereabouts file into sharepoint as Excel files
+		
+		# 4 - historical primary form file
+		eir_sdsi_hist_pf_df = get_eir_sdsi_historical_primary_form_data(date_to_overwrite)
+		write_parquet(eir_sdsi_hist_pf_df, PRIMARYFORM_HISTORICAL_OUTPUT_TABLE_NAME) # write to Athena tables as Parquet.
+***		populate_historical_primary_form_file(eir_sdsi_hist_pf_df, date_to_overwrite) # populate and write the historical primary form files into sharepoint as Excel files
+		
+		response = {'statusCode': 200, 'body': {'Result': 'Success'}}
+		
+		
+    except Exception as error:
+        traceback.print_exc()
+        raise error
+		
+	return response	
+
+# Create SQL query and call executioner
+def get_eir_sdsi_main_data(date_to_overwrite)
+    
+	# 1 - SQL query - use today if no date given
+	if date_to_overwrite == '':
+		with open('sql/eir_sdsi_query.sql', encoding='utf-8') as sql_file:
+			sql = sql_file.read()
+    else:
+        with open('sql/eir_sdsi_query.sql', encoding='utf-8') as sql_file:
+            sql = sql_file.read().replace('current_date', f"date('{date_to_overwrite}')")
+
+    # 2 - execute SQL query and convert to DF
+	eir_sdsi_data = get_dataframe_of_records(sql, DATABASE)
+	
+	# update the date column
+    if date_to_overwrite == '':
+        eir_sdsi_data['ss_date'] = get_date_str()
+    else:
+        eir_sdsi_data['ss_date'] = date_to_overwrite
+
+    # Return DF
+	return eir_sdsi_data 
+
+	
+# Same for:
+def get_eir_sdsi_primary_form_data(date_to_overwrite)
+def get_eir_sdsi_whereabouts_data(date_to_overwrite):
+def get_eir_sdsi_historical_primary_form_data(date_to_overwrite):
+
+
+
+# Executioner - Run SQL query and return as a DF
+def get_dataframe_of_records(sql, database=DATABASE, workgroup=WORKGROUP_NAME, s3=S3_OUTPUT):
+
+    # fetch the data from Athena
+    df = wr.athena.read_sql_query(sql, database=database, ctas_approach=False, workgroup=workgroup, s3_output=s3)
+    return df
+
+
+# Populating Excel files using template
+def populate_whereabouts_file(df, date_to_overwrite):
+    
+	writer = BookWriter(Path('templates/nbi_connections_eir_whereabouts.tmpl.xlsx'))  # create the Bookwriter from the template
+*** payloads = get_whereabouts_tmpl_payloads(df)   # create the payload for the template including any static values and the dataframe data
+    writer.render_book(payloads=payloads)          # render the book from the
+    
+	# build output path
+	if date_to_overwrite == '':
+        # append the date to filename
+        file_name = f'NBI-EIR-Whereabouts-{get_date_str()}.xlsx'
+    else:
+        # append the overwrite date to filename
+        file_name = f'NBI-EIR-Whereabouts-{date_to_overwrite}.xlsx'
+    report_path = Path(f'{OUTPUT_ROOT}/', file_name)
+    
+	# write the file
+    writer.save(report_path)
+
+    # write to SharePoint
+    # create the whereabouts reports folder if not existing
+    _create_sharepoint_folder(EIR_SDSI_SHAREPOINT_FOLDER, WHEREABOUTS_SHAREPOINT_FOLDER)
+    # upload the file to sharepoint
+    _upload_file_to_sharepoint(report_path, f'{EIR_SDSI_SHAREPOINT_FOLDER}/{WHEREABOUTS_SHAREPOINT_FOLDER}', file_name)
+    logger.info(f'Processing Complete!')
+	
+
+# whereabouts
+# This function returns a list with one item, a dictionary.
+# The dictionary has two key: value pairs.
+# The first key is 'sheet_name' with value 'whereabouts'
+# The second key is 'df' with value the DF passed in.
+def get_whereabouts_tmpl_payloads(df):
+    # any static data needed in the bookwriter
+    info = {}
+    info.update(
+        {
+            'sheet_name': 'whereabouts',
+        }
+    )
+    info['df'] = df
+    return [info]
+
+
+# primaryform
+# This function returns a list with one item, a dictionary.
+# The dictionary has many key: value pairs.
+# The first key is 'sheet_name' with value 'primaryform'
+# The remaining items are field names and values for BookWriter.render_book
+def get_primaryform_tmpl_payloads(df, index):
+    # any static data needed in the bookwriter
+    info = {}
+    info.update(
+        {
+            'sheet_name': 'primaryform',
+            'order_date': df.loc[index, "order_date"],
+            'operator': df.loc[index, "operator"],
+            'operator_contact_name': df.loc[index, "operator_contact_name"],
+            'operator_contact_position': df.loc[index, "operator_contact_position"],
+            'operator_contact_email': df.loc[index, "operator_contact_email"],
+            'operator_contact_phone': df.loc[index, "operator_contact_phone"],
+            'oao_ref': df.loc[index, "oao_ref"],
+            'a_end_ipid': df.loc[index, "a_end_ipid"],
+            'a_end_label': df.loc[index, "a_end_label"],
+            'a_end_itm_east': df.loc[index, "a_end_itm_coord_east_m"],
+            'a_end_itm_north': df.loc[index, "a_end_itm_coord_north_m"],
+            'b_end_ipid': df.loc[index, "b_end_ipid"],
+            'b_end_label': df.loc[index, "b_end_label"],
+            'b_end_itm_east': df.loc[index, "b_end_itm_coord_east_m"],
+            'b_end_itm_north': df.loc[index, "b_end_itm_coord_north_m"],
+            'pf_carriageway_in_m': df.loc[index, "pf_carriageway_in_m"],
+            'verge_in_m': df.loc[index, "verge_in_m"],
+            'footway_in_m': df.loc[index, "footway_in_m"],
+            'length_in_m': df.loc[index, "length_in_m"],
+            'latest_sad': df.loc[index, "latest_sad"],
+            'subcontractor_company': df.loc[index, "subcontractor_company"],
+            'subcontractor_contact_name': df.loc[index, "subcontractor_contact_name"],
+            'subcontractor_contact_phone': df.loc[index, "subcontractor_contact_phone"]
+        }
+    )
+    return [info]
+
